@@ -10,6 +10,7 @@
 import gym
 import numpy as np
 import logging
+from gym.spaces import Box
 logger = logging.getLogger(__name__)  # 使用当前模块名
 
 class Env:
@@ -28,17 +29,25 @@ class Env:
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
 
-        # # 获取状态空间的大小（假设 FrozenLake 是一个网格地图，这里 nrow 和 ncol 可以直接得到）
-        # self.State_Num = self.observation_space.n
-        # # 获取动作空间的大小，即可选择的动作数量
-        # self.Action_Num = self.envs.action_space.n
+        if isinstance(self.observation_space, Box):
+            print("self.observation_space is a Box object!")
+            self.State_Num = self.env.observation_space.shape
+            # 获取动作空间的大小，即可选择的动作数量
+            self.Action_Num = self.env.action_space.shape
+        else:
+            print("self.observation_space is not a Box object!")
+            # # 获取状态空间的大小（假设 FrozenLake 是一个网格地图，这里 nrow 和 ncol 可以直接得到）
+            self.State_Num = self.observation_space.n
+            # # 获取动作空间的大小，即可选择的动作数量
+            self.Action_Num = self.envs.action_space.n
+            # 初始化Q（s，a）表
+            self.q_sa = np.zeros((self.State_Num, self.Action_Num))
 
         # 模型存储控制
         self.save_policy = False
         self.load_model = False
         self.train = False
-        # 初始化Q（s，a）表
-        # self.q_sa = np.zeros((self.State_Num, self.Action_Num))
+
 
         # 折扣因子，决定了未来奖励的影响
         self.gamma = 0.9
