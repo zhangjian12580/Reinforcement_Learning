@@ -22,6 +22,7 @@ class EnvInit(Env):
     算法参数初始化
     """
     def __init__(self, name = 'Taxi-v3', render_mode = render_model[0], render = True):
+
         super().__init__(name, render_mode, render)
         # 是否开启动画
         if render:
