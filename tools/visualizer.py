@@ -6,7 +6,6 @@
 @Email   : your_email@example.com
 @Desc    :
 """
-from cProfile import label
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,7 +26,7 @@ class Visualizer:
     avg_rewards_across_iterations = []  # 用于保存每个迭代的平均奖励
     iterations = []  # 用于保存每个迭代的编号
     save_picture = True # 保存图像开关
-    print_by_step = 1000 # 每隔N步打印一次图像
+    print_by_step = 50 # 每隔N步打印一次图像
 
     picture_dir = os.path.join(os.path.dirname(__file__), 'picture_dir')
     if not os.path.exists(picture_dir):
@@ -122,6 +121,7 @@ class Visualizer:
         """
         绘制所有迭代的平均奖励曲线，每隔10轮更新一次图像，并在最后一步打印最终图像。
         """
+
         # 初始化保存平均奖励和迭代次数的列表
         if not hasattr(Visualizer, 'avg_rewards_across_iterations'):
             Visualizer.avg_rewards_across_iterations = []
@@ -168,7 +168,7 @@ class Visualizer:
                 transform=plt.gca().transAxes
             )
             plt.tight_layout()
-            plt.pause(0.001)  # 动态显示图像
+            # plt.pause(0.001)  # 动态显示图像
 
             if Visualizer.save_picture:
                 # 保存图像
@@ -180,8 +180,8 @@ class Visualizer:
                 logger.info("Cumulative average rewards plot saved.")
 
             # 如果不是最后一轮，则关闭图像
-            if iteration != total_iterations:
-                plt.close()
+            # if iteration != total_iterations:
+            plt.close()
 
     @staticmethod
     def plot_maintain_curve(positions, velocities):

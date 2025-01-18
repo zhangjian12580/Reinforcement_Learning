@@ -7,7 +7,7 @@
 @Desc    : study
 """
 import run_function_by_class as select
-from tools.printer_tool import PrintTool as print_tool
+from tools.printer_tool import PrintTool as printout
 # 根记录器的日志
 import logging
 # 在主程序或入口文件中首先调用 setup_logging()，确保配置生效
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 if __name__ == '__main__':
     show_all_env = False
     if show_all_env:
-        print_tool.print_all_env()
-        print_tool.get_related_env(name="Taxi-v3")
+        printout.print_all_env()
+        printout.get_related_env(name="Taxi-v3")
 
     choose_env = {
         "冰面滑行": "FrozenLake-v1",

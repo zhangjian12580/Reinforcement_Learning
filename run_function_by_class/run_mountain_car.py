@@ -11,24 +11,28 @@ from envs.mountaincar import *
 from run_function_by_class.run_select_func import run_select_func
 def run_mountain_car():
     """
-    出租车调度
+    小车上山
     :return:
     """
-    # 创建 Blackjack 环境
+    # 创建 MountainCar 环境
     env = MountainCar()
     # 策略评估并绘制价值函数图
     policy_name = {
-        0: "施加持续向右的力",
-        1: "隐藏SARSA策略更新",
-        2: "期望SARSA策略更新",
-        3: "Q-Learning更新",
-        4: "Double-Q-Learning更新",
-        5: "资格迹学习更新",
+        0: "函数近似SARSA算法",
+        1: "函数近似SARSA(𝜆)算法",
+        2: "深度Q学习算法",
+        3: "深度Q学习算法_pytorch",
+        4: "Double深度Q学习算法_pytorch",
+        5: "xx",
     }
     get_function = {
         0: env.play_game,  # 执行一步游戏
-
+        1: lambda: env.game_iteration(show_policy=policy_name[0]),
+        2: lambda: env.game_iteration(show_policy=policy_name[1]),
+        3: lambda: env.game_iteration(show_policy=policy_name[2]),
+        4: lambda: env.game_iteration(show_policy=policy_name[3]),
+        5: lambda: env.game_iteration(show_policy=policy_name[4]),
     }
     # 选择get_function中序号
-    choice_method = 0
+    choice_method = 4
     run_select_func(get_function, choice_method)
