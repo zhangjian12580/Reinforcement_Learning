@@ -20,10 +20,8 @@ def run_mountain_car():
     policy_name = {
         0: "函数近似SARSA算法",
         1: "函数近似SARSA(𝜆)算法",
-        2: "深度Q学习算法",
-        3: "深度Q学习算法_pytorch",
-        4: "Double深度Q学习算法_pytorch",
-        5: "xx",
+        2: "深度Q学习算法_pytorch",
+        3: "Double深度Q学习算法_pytorch",
     }
     get_function = {
         0: env.play_game,  # 执行一步游戏
@@ -31,8 +29,7 @@ def run_mountain_car():
         2: lambda: env.game_iteration(show_policy=policy_name[1]),
         3: lambda: env.game_iteration(show_policy=policy_name[2]),
         4: lambda: env.game_iteration(show_policy=policy_name[3]),
-        5: lambda: env.game_iteration(show_policy=policy_name[4]),
     }
     # 选择get_function中序号
-    choice_method = 4
+    choice_method = 2
     run_select_func(get_function, choice_method)

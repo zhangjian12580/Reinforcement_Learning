@@ -60,6 +60,9 @@ class EnvInit(Env):
         self.Action_Num = self.env.action_space.n
         # 位置
         self.positions = []
+        # 用于跟踪最近游戏的完成率
+        self.done_rate = deque(maxlen=100)
+        self.done_rate.clear()
         # 速度
         self.velocities = []
         # 保存模型
@@ -115,9 +118,9 @@ class TileCoder:
 
     @property
     def get_features(self):
-        return self.__get_features
+        return self.__get_hash_index
 
-    def __get_features(self, codeword):
+    def __get_hash_index(self, codeword):
         # codebook = {(0, 25, 10, 1): 0, (0, 25, 10, 2): 1, (0, 25, 11, 1): 2}
         logger.debug(f"codeword:{codeword}")
         codeword = tuple(codeword)
@@ -132,7 +135,7 @@ class TileCoder:
             self.codebook[codeword] = count  # 如果特征数量未超出限制，则为该编码分配一个新的特征ID
             return count
 
-    def __call__(self, floats=(), ints=()):
+    def __call__(self, continuous_floats=(), discrete_ints=()):
         """
         floats: 浮动特征，离散化的连续输入特征, floats = (3.4, 1.2)
 
@@ -144,7 +147,7 @@ class TileCoder:
         # 使用 __call__ 方法（实际上是直接通过实例调用）得到离散化的特征
         features = network(floats=floats, ints=ints)
         """
-        dim = len(floats)
+        dim = len(continuous_floats)
 
         # 举例：对于输入为(0,10)的区间，如果被layers=3划分，且每个划分的偏移量不同，
         # 不同的使得每一层的瓦砖划分具有不同的精度和视角，因此增强了编码的表达能力。
@@ -156,8 +159,8 @@ class TileCoder:
         # 第二层：位置x划分为[0, 2), [2, 5), [5, 8), [8, 10]
         # 第三层：位置x划分为[0, 1), [1, 4), [4, 7), [7, 10]
         # 可以把缩放看作是面积的放大，因为面积是x^2，当x缩放3倍，就是3x，面积就是3*3*x^2，所以，是对于某一个特征是f*layer*layer
-        scales_floats = tuple(f * self.layers * self.layers for f in floats)
-        features = []
+        scales_continuous_state = tuple(continuous_state * self.layers * self.layers for continuous_state in continuous_floats)
+        hash_index_by_scale = []
         for layer in range(self.layers):
             # 1 + dim * i目的是为了在不同的层（layer）和特征（i）之间引入不同的偏移量。
             # 当 i = 0 时，偏移量是 1 + 3 * 0 = 1，这就相当于给第一个特征（比如位置）添加一个基本的偏移量 1。
@@ -165,14 +168,14 @@ class TileCoder:
             # 当 i = 2 时，偏移量是 1 + 3 * 2 = 7，这就相当于给第三个特征（比如角度）添加一个偏移量 7。
             # 将每一层的离散化特征和整数特征（如状态或动作）一起拼接成一个 codeword
             # dim作用: 增大不同特征之间的区别防止特征的偏移量相互干扰；瓦砖编码的表达能力下降
-            codeword = ((layer,) + tuple(int((f + (1 + dim * i) * layer) / self.layers)
-                                         for i, f in enumerate(scales_floats)) +
-                        (ints if isinstance(ints, tuple) else (ints,)))
+            codeword = ((layer,) + tuple(int((each_sc_state + (1 + dim * index) * layer) / self.layers)
+                                         for index, each_sc_state in enumerate(scales_continuous_state)) +
+                        (discrete_ints if isinstance(discrete_ints, tuple) else (discrete_ints,)))
             # codeword = (0, 25, 10, 1)
-            feature = self.__get_features(codeword)
+            index_in_hash = self.__get_hash_index(codeword)
             # feature在self.codebook中对应的值，这个映射相当于做个转换，将编码元组转换为w中的索引
-            features.append(feature)
-        return features
+            hash_index_by_scale.append(index_in_hash)
+        return hash_index_by_scale
 
 
 class SARSAAgent(EnvInit):
@@ -190,6 +193,7 @@ class SARSAAgent(EnvInit):
         :param features: 总的特征数量
         """
         super().__init__()  # 初始化父类（包含环境相关参数）
+        self.game_rounds = 1000
         self.obs_low = self.env.observation_space.low  # 环境观测的最小值
         self.obs_scale = self.env.observation_space.high - self.env.observation_space.low  # 环境观测的范围
         self.layers = layers  # TileCoder 的层数
@@ -197,9 +201,9 @@ class SARSAAgent(EnvInit):
 
         if not self.load_model:  # 如果未加载模型，则初始化 TileCoder 和权重
             self.tile_coder = TileCoder(layers, features)  # 初始化TileCoder，用于状态和动作的编码
-            self.weights = np.zeros(features)  # 初始化权重为零向量，把weights看作是Q-table
+            self.policy = np.zeros(features)  # 初始化权重为零向量，把weights看作是Q-table
         else:  # 如果加载模型，则恢复权重和编码器状态
-            self.weights, codebook = Policy_loader.load_w_para(class_name=self.__class__.__name__,
+            self.policy, codebook = Policy_loader.load_w_para(class_name=self.__class__.__name__,
                                                                method_name="play_game_by_sarsa_resemble.pkl")
             self.tile_coder = TileCoder(layers, features, codebook)  # 使用加载的codebook初始化TileCoder
 
@@ -208,7 +212,7 @@ class SARSAAgent(EnvInit):
         编码观测和动作为特征向量
         :param observation: 当前状态（连续值）
         :param action: 动作（离散值）
-        :return: 特征索引列表[]->list
+        :return: 特征索引列表[16, 29, 71, 19, 20, 21, 22, 23]
         """
         # 将观测值归一化到 [0, 1] 范围，并转换为元组
         states = tuple((observation - self.obs_low) / self.obs_scale)
@@ -219,14 +223,15 @@ class SARSAAgent(EnvInit):
 
     def get_weights(self, observation, action):
         """
+        本质上就是动作价值表
         根据layers层数获取当前的（observation, action）在不同层的特征的索引，通过索引在w中找到参数，求和
         获取动作的Q值
         :param observation: 当前状态
         :param action: 动作
         :return: 对应的weights或者Q(s, a)值
         """
-        features = self.preprocess_encode(observation, action)  # 编码观测和动作为特征索引: [16, 29, 71, 19, 20, 21, 22, 23]
-        return self.weights[features].sum()  # 根据权重和特征计算Q值
+        hash_index_scale = self.preprocess_encode(observation, action)  # 编码观测和动作为特征索引: [16, 29, 71, 19, 20, 21, 22, 23]
+        return self.policy[hash_index_scale].sum()  # 根据权重和特征计算Q值
 
     def agent_resemble_decide(self, observation):
         """
@@ -257,7 +262,7 @@ class SARSAAgent(EnvInit):
         # 获取当前状态和动作的特征索引
         features = self.preprocess_encode(observation, action)
         # 根据TD误差更新权重
-        self.weights[features] += self.learning_rate * td_error
+        self.policy[features] += self.learning_rate * td_error
 
     def play_game_by_sarsa_resemble(self, train=False):
         """
@@ -290,6 +295,8 @@ class SARSAAgent(EnvInit):
 
             if done:
                 logger.info(f"结束一轮游戏")
+                flag = True if episode_reward > -200 else False
+                self.done_rate.append(flag)
                 break
             observation, action = next_observation, next_action
         return episode_reward
@@ -302,6 +309,7 @@ class SARSALamdaAgent(EnvInit):
 
     def __init__(self, lamda=0.9, layers=8, features=1893):
         super().__init__()
+        self.game_rounds = 1000
         self.lamda = lamda
         self.layers = layers
         self.features = features
@@ -313,9 +321,9 @@ class SARSALamdaAgent(EnvInit):
         self.load_model = True
         if not self.load_model:
             self.tile_coder = TileCoder(self.layers, self.features)
-            self.weights = np.zeros(features)
+            self.policy = np.zeros(features)
         else:
-            self.weights, codebook = Policy_loader.load_w_para(class_name=self.__class__.__name__,
+            self.policy, codebook = Policy_loader.load_w_para(class_name=self.__class__.__name__,
                                                                method_name="play_game_by_sarsa_lamda.pkl")
             self.tile_coder = TileCoder(self.layers, self.features, codebook)
 
@@ -336,7 +344,7 @@ class SARSALamdaAgent(EnvInit):
         """
         features = self.process_encode(observation, action)
         # logger.info(f"features:{features}")
-        return self.weights[features].sum()
+        return self.policy[features].sum()
 
     def agent_resemble_decide(self, observation):
         """
@@ -367,10 +375,7 @@ class SARSALamdaAgent(EnvInit):
         """
 
         # 计算当前的目标值 u_t
-        u_t = reward  # 当前奖励作为初始目标值
-        if not done:
-            # 如果不是终止状态，目标值中需要加入下一状态-动作对的折扣 Q 值
-            u_t += (self.gamma * self.get_weights(next_observation, next_action))
+        u_t = reward + (self.gamma * self.get_weights(next_observation, next_action))
 
         # 减小当前迹线的强度 (递减因子由 gamma 和 λ 共同决定)
         self.e_tracy *= (self.gamma * self.lamda)
@@ -382,12 +387,12 @@ class SARSALamdaAgent(EnvInit):
         # 这表示最近访问的状态-动作对有最高的更新优先级
         self.e_tracy[features] = 1.
 
-        # 计算 TD 误差 (Temporal Difference Error)
+        # 计算 TD 误差 (Temporal Difference Error)，可以看作梯度，来引导权重更新方向
         td_error = u_t - self.get_weights(observation, action)
 
         # 根据 TD 误差以及迹线值更新所有权重
         # 迹线值表示历史上状态-动作对对当前学习过程的影响程度
-        self.weights += (self.learning_rate * td_error * self.e_tracy)
+        self.policy += (self.learning_rate * td_error * self.e_tracy)
 
         # 如果是终止状态，将迹线值重置为零
         if done:
@@ -424,10 +429,12 @@ class SARSALamdaAgent(EnvInit):
             if train:
                 self.sarsa_lamda_learn(observation, action, reward, next_observation, next_action, done)
             else:
-                time.sleep(2)
+                time.sleep(0)
 
             if done:
                 logger.info(f"结束一轮游戏")
+                flag = True if episode_reward > -200 else False
+                self.done_rate.append(flag)
                 break
             observation, action = next_observation, next_action
         return episode_reward
@@ -486,6 +493,8 @@ class DQNReplayer:
         # 从存储的经验中随机选择索引
         indices = np.random.choice(self.count, size=size)
         return (np.stack(self.memory.loc[indices, field]) for field in self.memory.columns)
+        # 把observation中的64个indices对应的数据堆叠起来
+        # obs = [[-1,0.3],[-3, 0.2],...]
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -516,15 +525,14 @@ class DQNAgentTorch(EnvInit):
 
         # 其他超参数
         self.learn_step_counter = int(0)  # 学习步计数器
-        self.learning_rate = 0.001 # 学习率
+        self.learning_rate = 0.001  # 学习率
         self.goal_position = 0.5
-        self.batch_size = batch_size # # 表示每次训练从数据集中提取 batch_size 个样本
+        self.batch_size = batch_size  # # 表示每次训练从数据集中提取 batch_size 个样本
         self.replay_start_size = 1000  # 经验池开始训练所需的最小样本数量
-        self.update_lr_steps = 10000 # 学习率刷新间隔
+        self.update_lr_steps = 10000  # 学习率刷新间隔
 
         # 用于跟踪最近游戏的完成率
-        self.done_rate = deque(maxlen=100)
-
+        # self.done_rate = deque(maxlen=100)
         # 初始化经验池
         self.replayer = DQNReplayer(replayer_capacity)
 
@@ -557,10 +565,14 @@ class DQNAgentTorch(EnvInit):
         构建简单的前馈神经网络
         """
         layers = []
-        input_dim = input_size
 
+        # 输入层的主要作用是接收并传递数据，不涉及任何权重或偏置的更新
+        # 输入层的大小是指网络中接收输入的节点数，它等于状态空间的维度
+        # 二维状态（如 [position, velocity]）的维度决定了输入层的大小。例如，状态 [0.5, -0.1] 对应输入层的 2 个节点
+        input_dim = input_size
+        # hidden_sizes = [64]，对于隐藏层中每个层级的维度，将输入或者前一层隐藏层的数量与当前的隐藏层数量构建一层神经网络
         for hidden_size in hidden_sizes:
-            layers.append(nn.Linear(input_dim, hidden_size))  # 全连接层
+            layers.append(nn.Linear(input_dim, hidden_size))  # 全连接层(2, 64)
             layers.append(activation())  # 激活函数
             input_dim = hidden_size
 
@@ -568,7 +580,7 @@ class DQNAgentTorch(EnvInit):
 
         if output_activation:
             layers.append(output_activation())
-
+        # 使用 nn.Sequential(*layers) 将所有层组合成一个顺序模型。nn.Sequential 会按顺序执行每一层。
         model = nn.Sequential(*layers)  # 顺序模型
         return model
 
@@ -590,34 +602,72 @@ class DQNAgentTorch(EnvInit):
         observations, actions, rewards, next_observations, dones = self.replayer.replay_sample(self.batch_size)
 
         # 转换为 PyTorch 张量
-        observations = torch.tensor(observations, dtype=torch.float32)
+        # 因为需要pytorch框架训练，模型以torch构建，所以需要转化为torch，用于GPU训练
+        """
+        1.与 PyTorch 神经网络兼容
+        2.支持 GPU 加速
+        3.方便进行梯度计算
+        """
+        observations = torch.tensor(observations, dtype=torch.float32)  # [batch_size, 2]
         actions = torch.tensor(actions, dtype=torch.long)
         rewards = torch.tensor(rewards, dtype=torch.float32)
         next_observations = torch.tensor(next_observations, dtype=torch.float32)
         dones = torch.tensor(dones, dtype=torch.float32)
 
         # 目标网络计算 Q 值
-        next_qs = self.target_net_pytorch(next_observations).detach()
-        next_max_qs = next_qs.max(dim=-1)[0]
-        us = rewards + self.gamma * next_max_qs * (1. - dones)
-
+        """
+        计算图 是描述操作和数据流的图结构，帮助框架进行自动微分和优化计算。
+        动态计算图 是 PyTorch 的特性，每次执行时生成新的计算图。
+        detach() 用于从计算图中分离张量，阻止它继续参与反向传播。
+        """
+        # 输入的批量状态经过神经网络计算输出每个状态的动作价值
+        """
+        q(S',a;w_目标)：next_q_value
+        """
+        next_q_value = self.target_net_pytorch(next_observations).detach()
+        """
+        next_q_value 是一个形状为 (batch_size, num_actions) 的张量
+        next_q_value.max(dim=-1) 返回一个元组，第一个元素是每个样本在所有动作中的最大 Q 值，第二个元素是该最大值的索引。
+        max{a}_q(S',a;w_目标):next_max_q_value
+        """
+        next_max_q_value = next_q_value.max(dim=-1)[0]
+        # 最优动作价值计算U_t->价值评估,以此作为训练时的目标，用于引导原来的动作价值调整
+        """
+        U = R + 𝛾 * max{a}_q(S',a;w_目标)
+        """
+        u_t = rewards + self.gamma * next_max_q_value * (1. - dones)  # (batch_size, 1)
+        """
+        更新的权重就是让评估网络去计算某动作下更差的价值，这样在下次选择就不会选择该动作(记住，一切都体现在动作价值上)
+        """
         # 当前 Q 值计算
-        qs = self.evaluate_net_pytorch(observations)
-        targets = qs.clone()
-        targets[torch.arange(self.batch_size), actions] = us
+        # 评估网络输出值，预测值，带梯度，为了使其逼进u_t，来更新evaluate_net_pytorch网络的权重
+        """
+        q(S,A;w): q_predict
+        """
+        q_predict = self.evaluate_net_pytorch(observations)
+        q_targets = q_predict.clone()
+        # 将u_t更新到选择的state-action对应目标动作价值上，这是更好的动作价值，不只训练最大的价值，对于其他为选择部分也会更新
+        q_targets[torch.arange(self.batch_size), actions] = u_t  # (batch_size, 3)
 
-        # 损失函数计算
-        loss = nn.SmoothL1Loss()(qs, targets)
+        # 损失函数计算，计算所有batch_size的平均loss，通常存在顺序，面前往后面逼进，q_predict, q_targets形状相同
+        loss = nn.SmoothL1Loss()(q_predict, q_targets)
 
         # 记录损失和平均 Q 值
         if self.learn_step_counter % 50 == 0:
             self.writer.add_scalar("Loss/train", loss.item(), self.learn_step_counter)
-            avg_q_value = qs.mean().item()
+            avg_q_value = q_predict.mean().item()
             self.writer.add_scalar("Q Value/Average", avg_q_value, self.learn_step_counter)
 
         # 反向传播更新权重
+        """
+        在 PyTorch 中，梯度是累积的（即每次 backward() 调用时，梯度会被加到现有的梯度上）。
+        因此，在每次反向传播之前，我们需要通过 zero_grad() 将之前的梯度清零，以防止梯度累积。
+        """
         self.evaluate_net_pytorch.zero_grad()
+        # 计算网络中所有参数的梯度（即偏导数）。
         loss.backward()
+        # 具体来说，dqn_optimizer 是一个优化器（如 Adam 或 SGD），
+        # 它会根据梯度来更新 evaluate_net_pytorch 网络的权重，使得损失函数最小化。
         self.dqn_optimizer.step()
 
     def dqn_torch_agent_decide(self, observation):
@@ -720,8 +770,8 @@ class DoubleDQNAgent(EnvInit):
         self.ddqn_batch_size = batch_size
         self.ddqn_replay_start_size = 1000
         self.ddqn_training_started = False
-        self.done_rate = deque(maxlen=100)
-        self.done_rate.clear()
+        # self.done_rate = deque(maxlen=100)
+        # self.done_rate.clear()
         self.ddqn_replayer = DQNReplayer(replayer_capacity)
         self.ddqn_evaluate_net_pytorch = self.ddqn_build_torch_network(input_size=observation_dim,
                                                                        output_size=self.Action_Num, **net_kwargs)
@@ -799,38 +849,38 @@ class DoubleDQNAgent(EnvInit):
         next_observations = torch.tensor(next_observations, dtype=torch.float32)
         dones = torch.tensor(dones, dtype=torch.float32)
 
-        # 1. 计算当前网络（评估网络）在 next_observations 上的 Q 值
+        # 1. 计算当前网络（评估网络）在 next_observations 上的 Q 值，q(S',a;w_评估)
         next_eval_qs = self.ddqn_evaluate_net_pytorch(next_observations)
 
-        # 2. 获取 next_eval_qs 中的最大 Q 值的索引作为选定的动作
+        # 2. 获取 next_eval_qs 中的最大 Q 值的索引作为选定的动作， argmax{a}_q(S',a;w_评估)
         next_actions = next_eval_qs.argmax(dim=-1)  # `argmax` 用于沿着指定的维度找到最大值的索引
 
-        # 3. 计算目标网络（target_net）在 next_observations 上的 Q 值
+        # 3. 计算目标网络（target_net）在 next_observations 上的 Q 值,q(S',a;w_目标)
         next_qs = self.ddqn_target_net_pytorch(next_observations).detach()  # 使用目标网络并且 `detach()` 防止梯度回传
 
-        # 4. 获取目标网络输出的每个样本的最大 Q 值（用于计算 Q-learning 的目标值）
+        # 4. 获取目标网络输出的每个样本的最大 Q 值（用于计算 Q-learning 的目标值）,q(S',argmax{a}_q(S',a;w_评估);w_目标)
         next_max_qs = next_qs.gather(dim=-1, index=next_actions.unsqueeze(-1))  # gather 提取每个样本对应的最大 Q 值
         next_max_qs = next_max_qs.squeeze(-1)  # 移除最后的维度，使其保持正确的形状
 
         # Q values from target network
         # next_qs = self.target_net_pytorch(next_observations).detach()
         # next_max_qs = next_qs.max(dim=-1)[0]
-        us = rewards + self.gamma * next_max_qs * (1. - dones)
+        u_t = rewards + self.gamma * next_max_qs * (1. - dones)
 
         # Get current Q values
-        qs = self.ddqn_evaluate_net_pytorch(observations)
+        q_predict = self.ddqn_evaluate_net_pytorch(observations)
 
         # Update the Q-values for the taken actions
-        targets = qs.clone()
-        targets[torch.arange(self.ddqn_batch_size), actions] = us
+        q_target = q_predict.clone()
+        q_target[torch.arange(self.ddqn_batch_size), actions] = u_t
 
         # Compute loss
         # loss = nn.MSELoss()(qs, targets)
-        loss = nn.SmoothL1Loss()(qs, targets)
+        loss = nn.SmoothL1Loss()(q_predict, q_target)
 
         if self.ddqn_learn_step_counter % 50 == 0:  # 每 50 步记录一次
             self.ddqn_writer.add_scalar("Loss/train", loss.item(), self.ddqn_learn_step_counter)
-            avg_q_value = qs.mean().item()
+            avg_q_value = q_predict.mean().item()
             self.ddqn_writer.add_scalar("Q Value/Average", avg_q_value, self.ddqn_learn_step_counter)
 
         # Back_propagate
@@ -869,9 +919,9 @@ class DoubleDQNAgent(EnvInit):
                 action = self.ddqn_torch_agent_decide(observation)
 
             next_observation, reward, terminated, truncated, _ = self.step(action)
-            # if not train:  # 只有在评估阶段才进行推理
-            # logger.info(f"状态-->{next_observation}")
-            # logger.info(f"奖励-->{reward}")
+            if not train:  # 只有在评估阶段才进行推理
+                logger.info(f"状态-->{next_observation}")
+                logger.info(f"奖励-->{reward}")
 
             episode_reward += reward
 
@@ -946,37 +996,37 @@ class MountainCar(SARSAAgent, SARSALamdaAgent, DQNAgentTorch, DoubleDQNAgent):
         episode_rewards = []  # 总轮数的奖励(某轮总奖励)列表
         logger.info(f"*****启动: {show_policy}*****")
         method_name = "default"
-        is_train = False
+        is_train = True
         for game_round in range(1, self.game_rounds):
             logger.info(f"---第{game_round}轮训练---")
 
             if show_policy == "函数近似SARSA算法":
                 # logger.info(f"函数近似SARSA算法")
-                episode_reward = self.play_game_by_sarsa_resemble(train=True)  # 第round轮次的累积reward
+                episode_reward = self.play_game_by_sarsa_resemble(train=False)  # 第round轮次的累积reward
                 method_name = self.play_game_by_sarsa_resemble.__name__
             if show_policy == "函数近似SARSA(𝜆)算法":
                 # logger.info(f"函数近似SARSA(𝜆)算法")
-                episode_reward = self.play_game_by_sarsa_lamda(train=True)  # 第round轮次的累积reward
+                episode_reward = self.play_game_by_sarsa_lamda(train=False)  # 第round轮次的累积reward
                 method_name = self.play_game_by_sarsa_lamda.__name__
             if show_policy == "深度Q学习算法_pytorch":
                 # logger.info(f"启动：深度Q学习算法_pytorch算法")
                 if game_round > 0 and game_round % self.update_lr_steps == 0:
                     self.learning_rate *= 0.1
                     logger.info(f"更新学习率:: {self.learning_rate},下降0.1")
-                episode_reward = self.play_game_by_dqn_torch_learning(train=False)  # 第round轮次的累积reward
+                episode_reward = self.play_game_by_dqn_torch_learning(train=True)  # 第round轮次的累积reward
                 method_name = self.play_game_by_dqn_torch_learning.__name__
             if show_policy == "Double深度Q学习算法_pytorch":
                 # logger.info(f"启动：深度Q学习算法_pytorch算法")
                 if game_round > 0 and game_round % self.update_lr_steps == 0:
                     self.ddqn_learning_rate *= 0.1
                     logger.info(f"更新学习率:: {self.ddqn_learning_rate},下降0.1")
-                episode_reward = self.play_game_by_double_dqn_torch_learning(train=False)  # 第round轮次的累积reward
+                episode_reward = self.play_game_by_double_dqn_torch_learning(train=True)  # 第round轮次的累积reward
                 method_name = self.play_game_by_double_dqn_torch_learning.__name__
 
             if is_train and self.save_policy and (game_round % 150 == 0 or game_round == self.game_rounds - 1):
                 if show_policy == "函数近似SARSA算法" or show_policy == "函数近似SARSA(𝜆)算法":
                     save_data = {
-                        "weights": self.weights,
+                        "weights": self.policy,
                         "encoder": self.tile_coder.codebook if self.tile_coder else None
                     }
                     Policy_loader.save_policy(method_name, self.class_name, save_data, step=game_round)
@@ -1000,13 +1050,14 @@ class MountainCar(SARSAAgent, SARSALamdaAgent, DQNAgentTorch, DoubleDQNAgent):
                         self.writer.add_scalar("Episode Reward", episode_reward, global_step=self.learn_step_counter)
                         self.ddqn_writer.add_scalar("Episode Reward", episode_reward,
                                                     global_step=self.ddqn_learn_step_counter)
-                rate_every_length = (round((self.done_rate.count(True) / len(self.done_rate)), 2) * 100)
-                logger.info(f"｜第{game_round}轮奖励: ${episode_reward}"
-                            f"｜>>>>>>>"
-                            f"｜前{len(self.done_rate)}回合成功率:{rate_every_length}%｜")
-                if len(self.done_rate) == 100 and rate_every_length >= 80 and is_train:
-                    logger.info(f"!!!成功率已经达到70%，自动停止训练!!!")
-                    break
+                # if show_policy == "深度Q学习算法_pytorch":
+                    rate_every_length = (round((self.done_rate.count(True) / len(self.done_rate)), 2) * 100)
+                    logger.info(f"｜第{game_round}轮奖励: ${episode_reward}"
+                                f"｜>>>>>>>"
+                                f"｜前{len(self.done_rate)}回合成功率:{rate_every_length}%｜")
+                    if len(self.done_rate) == 100 and rate_every_length >= 100 and is_train:
+                        logger.info(f"!!!成功率已经达到80%，自动停止训练!!!")
+                        break
 
 
             else:
