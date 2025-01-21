@@ -10,10 +10,6 @@
 import time
 from collections import deque
 import torch
-import os
-import keras
-from keras.api.initializers import GlorotUniform
-import tensorflow as tf
 import gym
 import numpy as np
 import logging
@@ -69,6 +65,10 @@ class EnvInit(Env):
         self.save_policy = False
         # 加载模型
         self.load_model = True
+        # 是否开启tensorboard记录logs
+        self.is_open_writer = False
+        # 是否全局训练，用于设置某些记录
+        self.global_is_train = True
         # 折扣因子，决定了未来奖励的影响
         self.gamma = 1.
         # 学习率
@@ -517,22 +517,21 @@ class DQNAgentTorch(EnvInit):
         observation_dim = self.env.observation_space.shape[0]  # 状态空间维度
         self.gamma = gamma  # 折扣因子
         self.epsilon = epsilon  # 探索概率
-
+        self.lamda = 0.9
         # TensorBoard writer 用于记录训练日志
         current_time = time.localtime()
         log_dir = time.strftime("runs/dqn_torch/%Y_%m_%d_%H_%M", current_time)
-        self.writer = SummaryWriter(log_dir=log_dir)
+        if self.is_open_writer:
+            self.writer = SummaryWriter(log_dir=log_dir)
 
         # 其他超参数
         self.learn_step_counter = int(0)  # 学习步计数器
-        self.learning_rate = 0.001  # 学习率
+        self.learning_rate = 0.0001  # 学习率
         self.goal_position = 0.5
         self.batch_size = batch_size  # # 表示每次训练从数据集中提取 batch_size 个样本
         self.replay_start_size = 1000  # 经验池开始训练所需的最小样本数量
-        self.update_lr_steps = 10000  # 学习率刷新间隔
+        self.update_lr_steps = 5000  # 学习率刷新间隔
 
-        # 用于跟踪最近游戏的完成率
-        # self.done_rate = deque(maxlen=100)
         # 初始化经验池
         self.replayer = DQNReplayer(replayer_capacity)
 
@@ -544,6 +543,11 @@ class DQNAgentTorch(EnvInit):
 
         # 优化器
         self.dqn_optimizer = torch.optim.Adam(self.evaluate_net_pytorch.parameters(), lr=self.learning_rate)
+        # 资格迹
+        output_layer_weight = self.evaluate_net_pytorch[-1].weight.T
+
+        # 创建一个与输出层权重形状相同的零矩阵
+        self.e_tracy_neural = torch.zeros_like(output_layer_weight)
 
         # 如果加载模型
         if self.load_model:
@@ -584,7 +588,69 @@ class DQNAgentTorch(EnvInit):
         model = nn.Sequential(*layers)  # 顺序模型
         return model
 
-    def dqn_torch_agent_learn(self, observation, action, reward, next_observation, done):
+    def dqn_agent_e_tracy_learn(self, observation, action, reward, next_observation, done, **kwargs):
+
+        self.evaluate_net_pytorch.train()  # 切换到训练模式
+
+        # 如果经验池样本不足，进行加载
+        if self.replayer.count <= self.replay_start_size:
+            with tqdm(total=10000, initial=self.replayer.count, dynamic_ncols=True, desc="经验池加载进度") as pbar:
+                for _ in range(10000):
+                    self.replayer.replay_store(observation, action, reward, next_observation, done, pbar=pbar)
+                    time.sleep(0.0002)  # 模拟加载延迟
+
+        # 存储经验并采样
+        self.replayer.replay_store(observation, action, reward, next_observation, done)
+        observations, actions, rewards, next_observations, dones = self.replayer.replay_sample(self.batch_size)
+
+        observations = torch.tensor(observations, dtype=torch.float32)  # [batch_size, 2]
+        actions = torch.tensor(actions, dtype=torch.long)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        next_observations = torch.tensor(next_observations, dtype=torch.float32)
+        dones = torch.tensor(dones, dtype=torch.float32)
+
+        next_q_value = self.target_net_pytorch(next_observations).detach()
+
+        next_max_q_value = next_q_value.max(dim=-1)[0]
+        u_t = rewards + self.gamma * next_max_q_value * (1. - dones)  # (batch_size, 1)
+
+        # 资格迹更新
+        self.e_tracy_neural *= (self.gamma * self.lamda)
+        # 假设 batch_size 和 actions 是正确的
+        actions = torch.clamp(actions, min=0, max=2)  # 确保 actions 的值在 [0, 2] 之间
+
+        # 对应的位置赋值为 1
+        # self.e_tracy_neural[actions, torch.arange(self.batch_size)] = 1.
+        self.e_tracy_neural[torch.arange(self.batch_size)][actions] = 1.
+
+        q_predict = self.evaluate_net_pytorch(observations)
+        q_targets = q_predict.clone()
+        # 将u_t更新到选择的state-action对应目标动作价值上，这是更好的动作价值，不只训练最大的价值，对于其他为选择部分也会更新
+        q_targets[torch.arange(self.batch_size), actions] = u_t  # (batch_size, 3)
+
+        # 计算损失函数，通常使用平均损失来进行优化
+        loss = nn.SmoothL1Loss()(q_predict, q_targets)
+
+        # 反向传播更新权重
+
+        self.evaluate_net_pytorch.zero_grad()
+        # 计算网络中所有参数的梯度（即偏导数）。
+        loss.backward()
+        # 具体来说，dqn_optimizer 是一个优化器（如 Adam 或 SGD），
+        # 它会根据梯度来更新 evaluate_net_pytorch 网络的权重，使得损失函数最小化。
+        # 使用资格迹更新所有权重
+        with torch.no_grad():
+            for param, e_trace in zip(self.evaluate_net_pytorch[-1].weight.T, self.e_tracy_neural):
+                param += self.learning_rate * loss.item() * e_trace
+
+        self.dqn_optimizer.step()
+        # 记录损失和平均 Q 值
+        if self.is_open_writer and self.learn_step_counter % 50 == 0:
+            self.writer.add_scalar("Loss/train", loss.item(), self.learn_step_counter)
+            avg_q_value = q_predict.mean().item()
+            self.writer.add_scalar("Q Value/Average", avg_q_value, self.learn_step_counter)
+
+    def dqn_torch_agent_learn(self, observation, action, reward, next_observation, done, **kwargs):
         """
         使用 DQN 算法更新网络
         """
@@ -652,12 +718,6 @@ class DQNAgentTorch(EnvInit):
         # 损失函数计算，计算所有batch_size的平均loss，通常存在顺序，面前往后面逼进，q_predict, q_targets形状相同
         loss = nn.SmoothL1Loss()(q_predict, q_targets)
 
-        # 记录损失和平均 Q 值
-        if self.learn_step_counter % 50 == 0:
-            self.writer.add_scalar("Loss/train", loss.item(), self.learn_step_counter)
-            avg_q_value = q_predict.mean().item()
-            self.writer.add_scalar("Q Value/Average", avg_q_value, self.learn_step_counter)
-
         # 反向传播更新权重
         """
         在 PyTorch 中，梯度是累积的（即每次 backward() 调用时，梯度会被加到现有的梯度上）。
@@ -669,6 +729,11 @@ class DQNAgentTorch(EnvInit):
         # 具体来说，dqn_optimizer 是一个优化器（如 Adam 或 SGD），
         # 它会根据梯度来更新 evaluate_net_pytorch 网络的权重，使得损失函数最小化。
         self.dqn_optimizer.step()
+        # 记录损失和平均 Q 值
+        if self.is_open_writer and self.learn_step_counter % 50 == 0:
+            self.writer.add_scalar("Loss/train", loss.item(), self.learn_step_counter)
+            avg_q_value = q_predict.mean().item()
+            self.writer.add_scalar("Q Value/Average", avg_q_value, self.learn_step_counter)
 
     def dqn_torch_agent_decide(self, observation):
         """
@@ -714,8 +779,10 @@ class DQNAgentTorch(EnvInit):
                 self.learn_step_counter += 1
 
             if train:
-                self.dqn_torch_agent_learn(observation, action, reward, next_observation, done)
-
+                # Deep Q-Learning Network
+                # self.dqn_torch_agent_learn(observation, action, reward, next_observation, done, train=train)
+                # Deep Q-Learning Network with lamda
+                self.dqn_agent_e_tracy_learn(observation, action, reward, next_observation, done, train=train)
             if done:
                 logger.info(f"结束一轮游戏")
                 flag = True if episode_reward > -200 else False
@@ -764,7 +831,8 @@ class DoubleDQNAgent(EnvInit):
         # TensorBoard writer
         current_time = time.localtime()
         log_dir = time.strftime("runs/double_dqn_torch/%Y_%m_%d_%H_%M", current_time)
-        self.ddqn_writer = SummaryWriter(log_dir=log_dir)
+        if self.is_open_writer:
+            self.ddqn_writer = SummaryWriter(log_dir=log_dir)
         self.ddqn_learn_step_counter = int(0)  # 学习步数计数器
         self.ddqn_learning_rate = 0.0001
         self.ddqn_batch_size = batch_size
@@ -825,7 +893,7 @@ class DoubleDQNAgent(EnvInit):
         qs = self.ddqn_evaluate_net_pytorch(observation)
         return qs.argmax(dim=1).item()
 
-    def double_dqn_agent_learn(self, observation, action, reward, next_observation, done):
+    def double_dqn_agent_learn(self, observation, action, reward, next_observation, done, **kwargs):
         self.ddqn_evaluate_net_pytorch.train()  # 切换到训练模式
 
         # 初始化进度条
@@ -863,8 +931,6 @@ class DoubleDQNAgent(EnvInit):
         next_max_qs = next_max_qs.squeeze(-1)  # 移除最后的维度，使其保持正确的形状
 
         # Q values from target network
-        # next_qs = self.target_net_pytorch(next_observations).detach()
-        # next_max_qs = next_qs.max(dim=-1)[0]
         u_t = rewards + self.gamma * next_max_qs * (1. - dones)
 
         # Get current Q values
@@ -878,16 +944,15 @@ class DoubleDQNAgent(EnvInit):
         # loss = nn.MSELoss()(qs, targets)
         loss = nn.SmoothL1Loss()(q_predict, q_target)
 
-        if self.ddqn_learn_step_counter % 50 == 0:  # 每 50 步记录一次
-            self.ddqn_writer.add_scalar("Loss/train", loss.item(), self.ddqn_learn_step_counter)
-            avg_q_value = q_predict.mean().item()
-            self.ddqn_writer.add_scalar("Q Value/Average", avg_q_value, self.ddqn_learn_step_counter)
-
         # Back_propagate
         self.ddqn_evaluate_net_pytorch.zero_grad()
         loss.backward()
         # Update weights using optimizer
         self.ddqn_optimizer.step()
+        if self.is_open_writer and self.ddqn_learn_step_counter % 50 == 0:  # 每 50 步记录一次
+            self.ddqn_writer.add_scalar("Loss/train", loss.item(), self.ddqn_learn_step_counter)
+            avg_q_value = q_predict.mean().item()
+            self.ddqn_writer.add_scalar("Q Value/Average", avg_q_value, self.ddqn_learn_step_counter)
 
     def play_game_by_double_dqn_torch_learning(self, train=False):
         """
@@ -996,7 +1061,6 @@ class MountainCar(SARSAAgent, SARSALamdaAgent, DQNAgentTorch, DoubleDQNAgent):
         episode_rewards = []  # 总轮数的奖励(某轮总奖励)列表
         logger.info(f"*****启动: {show_policy}*****")
         method_name = "default"
-        is_train = True
         for game_round in range(1, self.game_rounds):
             logger.info(f"---第{game_round}轮训练---")
 
@@ -1013,7 +1077,7 @@ class MountainCar(SARSAAgent, SARSALamdaAgent, DQNAgentTorch, DoubleDQNAgent):
                 if game_round > 0 and game_round % self.update_lr_steps == 0:
                     self.learning_rate *= 0.1
                     logger.info(f"更新学习率:: {self.learning_rate},下降0.1")
-                episode_reward = self.play_game_by_dqn_torch_learning(train=True)  # 第round轮次的累积reward
+                episode_reward = self.play_game_by_dqn_torch_learning(train=False)  # 第round轮次的累积reward
                 method_name = self.play_game_by_dqn_torch_learning.__name__
             if show_policy == "Double深度Q学习算法_pytorch":
                 # logger.info(f"启动：深度Q学习算法_pytorch算法")
@@ -1023,7 +1087,7 @@ class MountainCar(SARSAAgent, SARSALamdaAgent, DQNAgentTorch, DoubleDQNAgent):
                 episode_reward = self.play_game_by_double_dqn_torch_learning(train=True)  # 第round轮次的累积reward
                 method_name = self.play_game_by_double_dqn_torch_learning.__name__
 
-            if is_train and self.save_policy and (game_round % 150 == 0 or game_round == self.game_rounds - 1):
+            if self.global_is_train and self.save_policy and (game_round % 150 == 0 or game_round == self.game_rounds - 1):
                 if show_policy == "函数近似SARSA算法" or show_policy == "函数近似SARSA(𝜆)算法":
                     save_data = {
                         "weights": self.policy,
@@ -1045,18 +1109,20 @@ class MountainCar(SARSAAgent, SARSALamdaAgent, DQNAgentTorch, DoubleDQNAgent):
 
             if episode_reward is not None:
                 episode_rewards.append(episode_reward)
-                if is_train:
+
+                if self.is_open_writer:
                     if self.learn_step_counter % 10 == 0:  # 每 10 轮记录一次奖励
                         self.writer.add_scalar("Episode Reward", episode_reward, global_step=self.learn_step_counter)
                         self.ddqn_writer.add_scalar("Episode Reward", episode_reward,
                                                     global_step=self.ddqn_learn_step_counter)
-                # if show_policy == "深度Q学习算法_pytorch":
+
+                if self.global_is_train:
                     rate_every_length = (round((self.done_rate.count(True) / len(self.done_rate)), 2) * 100)
                     logger.info(f"｜第{game_round}轮奖励: ${episode_reward}"
                                 f"｜>>>>>>>"
                                 f"｜前{len(self.done_rate)}回合成功率:{rate_every_length}%｜")
-                    if len(self.done_rate) == 100 and rate_every_length >= 100 and is_train:
-                        logger.info(f"!!!成功率已经达到80%，自动停止训练!!!")
+                    if len(self.done_rate) == 100 and rate_every_length >= 100 and self.global_is_train:
+                        logger.info(f"!!!成功率已经达到100%，自动停止训练!!!")
                         break
 
 

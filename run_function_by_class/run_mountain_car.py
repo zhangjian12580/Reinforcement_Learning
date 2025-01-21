@@ -31,5 +31,5 @@ def run_mountain_car():
         4: lambda: env.game_iteration(show_policy=policy_name[3]),
     }
     # 选择get_function中序号
-    choice_method = 2
+    choice_method = 3
     run_select_func(get_function, choice_method)
