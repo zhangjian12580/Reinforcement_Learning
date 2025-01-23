@@ -78,7 +78,6 @@ class Policy_loader:
 
     @staticmethod
     def load_dqn_network(dir):
-
         loaded_model = keras.models.load_model(filepath=f'{dir}.h5')
         print(f"模型已加载自 {Policy_loader.save_dir}")
         return loaded_model

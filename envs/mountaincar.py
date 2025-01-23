@@ -198,10 +198,11 @@ class SARSAAgent(EnvInit):
         self.obs_scale = self.env.observation_space.high - self.env.observation_space.low  # 环境观测的范围
         self.layers = layers  # TileCoder 的层数
         self.features = features  # 特征数量
+        self.theta = np.zeros(features)  # 明确定义权重矩阵
 
         if not self.load_model:  # 如果未加载模型，则初始化 TileCoder 和权重
             self.tile_coder = TileCoder(layers, features)  # 初始化TileCoder，用于状态和动作的编码
-            self.policy = np.zeros(features)  # 初始化权重为零向量，把weights看作是Q-table
+            self.policy = np.zeros(features)  # 初始化权重为零向量，把policy看作是Q-table
         else:  # 如果加载模型，则恢复权重和编码器状态
             self.policy, codebook = Policy_loader.load_w_para(class_name=self.__class__.__name__,
                                                                method_name="play_game_by_sarsa_resemble.pkl")
@@ -261,8 +262,11 @@ class SARSAAgent(EnvInit):
         td_error = u_t - self.get_weights(observation, action)
         # 获取当前状态和动作的特征索引
         features = self.preprocess_encode(observation, action)
-        # 根据TD误差更新权重
+        # 根据TD误差更新权重（改公式实际将参数矩阵隐藏在policy中）
         self.policy[features] += self.learning_rate * td_error
+        # 显示的存储参数矩阵 Q(s, a) = w . 𝛟(s, a)，这种方式比较低效
+        # self.theta += self.learning_rate * td_error * features
+        # self.policy = np.dot(self.theta, features)
 
     def play_game_by_sarsa_resemble(self, train=False):
         """
@@ -716,6 +720,8 @@ class DQNAgentTorch(EnvInit):
         q_targets[torch.arange(self.batch_size), actions] = u_t  # (batch_size, 3)
 
         # 损失函数计算，计算所有batch_size的平均loss，通常存在顺序，面前往后面逼进，q_predict, q_targets形状相同
+        # 为了计算损失，q_predict 和 q_targets 必须在计算图中。
+        # 计算图用于跟踪每个张量的计算过程，以便计算梯度并进行反向传播。
         loss = nn.SmoothL1Loss()(q_predict, q_targets)
 
         # 反向传播更新权重
@@ -724,7 +730,8 @@ class DQNAgentTorch(EnvInit):
         因此，在每次反向传播之前，我们需要通过 zero_grad() 将之前的梯度清零，以防止梯度累积。
         """
         self.evaluate_net_pytorch.zero_grad()
-        # 计算网络中所有参数的梯度（即偏导数）。
+        # 计算网络中所有参数的梯度（即偏导数），
+        # 会从标量损失（通常是单个数值）出发，沿着计算图向后传播，逐步计算所有依赖该损失的张量的梯度
         loss.backward()
         # 具体来说，dqn_optimizer 是一个优化器（如 Adam 或 SGD），
         # 它会根据梯度来更新 evaluate_net_pytorch 网络的权重，使得损失函数最小化。
