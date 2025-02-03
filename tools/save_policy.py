@@ -55,6 +55,16 @@ class Policy_loader:
                         'optimizer_state_dict': policy['ddqn_optimizer'].state_dict(), }, f'{target_net_dir_py}.pth')
             logger.info(f"保存-->ddqn_evaluate_net_pytorch+-->ddqn_target_net_pytorch模型")
             # torch.save(policy['target_net_pytorch'].state_dict(), f'{target_net_dir_py}.pth')
+        elif "policy_net" in policy:
+            policy_net_dir_py = os.path.join(policy_dir, f'policy_net')
+            baseline_net_dir_py = os.path.join(policy_dir, f'baseline_net')
+            # 保存 evaluate_net_pytorch 和 target_net_pytorch 的模型权重（state_dict）
+            torch.save({'model_state_dict': policy['policy_net'].state_dict(),
+                        'optimizer_state_dict': policy['policy_optimizer'].state_dict(), }, f'{policy_net_dir_py}.pth')
+
+            torch.save({'model_state_dict': policy['baseline_net'].state_dict(),
+                        'optimizer_state_dict': policy['baseline_optimizer'].state_dict(), }, f'{baseline_net_dir_py}.pth')
+            logger.info(f"保存-->policy_net+-->baseline_net_dir_py模型")
 
     @staticmethod
     def load_policy(class_name, method_name):

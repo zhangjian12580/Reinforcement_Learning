@@ -12,10 +12,12 @@ from .run_ice_skating import run_ice_skating_game
 from .run_21_points import run_21_points_game
 from .run_select_func import run_select_func
 from .run_mountain_car import run_mountain_car
+from .run_cartpole import run_cartpole
 
 logger.info(f"Initializing run_function")
 __all__ = ['run_taxi_dispatch',
            'run_ice_skating_game',
            'run_21_points_game',
            'run_select_func',
-           'run_mountain_car']
+           'run_mountain_car',
+           'run_cartpole']

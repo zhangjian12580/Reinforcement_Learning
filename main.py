@@ -26,10 +26,11 @@ if __name__ == '__main__':
         "21点游戏": "Blackjack-v1",
         "出租车调度": "Taxi-v3",
         "小车上山": "MountainCar-v0",
+        "平衡杆": "CartPole-v0",
         # ...
     }
 
-    choose = choose_env.get("小车上山")
+    choose = choose_env.get("平衡杆")
     if choose == "Blackjack-v1":
         select.run_21_points_game()
     if choose == "FrozenLake-v1":
@@ -38,3 +39,5 @@ if __name__ == '__main__':
         select.run_taxi_dispatch()
     if choose == "MountainCar-v0":
         select.run_mountain_car()
+    if choose == "CartPole-v0":
+        select.run_cartpole()
