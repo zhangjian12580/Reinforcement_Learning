@@ -18,12 +18,12 @@ def run_cartpole():
     # 策略评估并绘制价值函数图
     policy_name = {
         0: "同策策略梯度算法",
+        1: "异策策略梯度算法"
     }
     get_function = {
-        # 0: env.step_one_info,  # 执行一步游戏
-        # 1: env.test_sarsa,
         0: lambda: env.game_iteration(policy_name[0]),  # 策略评估0
+        1: lambda: env.game_iteration(policy_name[1]),  # 策略评估0
     }
     # 选择get_function中序号
-    choice_method = 0
+    choice_method = 1
     run_select_func(get_function, choice_method)
