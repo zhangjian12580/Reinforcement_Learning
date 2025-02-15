@@ -184,17 +184,18 @@ class VPGAgent(EnvInit):
 
     def vpg_learn(self, observation, action, reward, done):
         self.trajectory.append((observation, action, reward))
-
+        # 因为是平衡游戏，所以只有当游戏强行停止时(也就是达到200步骤)，才会结束
         if done:
             # 将轨迹转换为 Pandas DataFrame
             df = pd.DataFrame(self.trajectory, columns=['observation', 'action', 'reward'])
-            # 会将索引转换为一个 Series 对象，其中每个元素表示轨迹的一个时间步
+            # df.index.to_series()会将索引转换为一个 Series 对象，=0,1,2,...,200，将索引作为幂次方对象
             df['discount'] = self.gamma ** df.index.to_series()
+            # df['discounted_reward']相当于每个奖励都会带一个折扣因子
             df['discounted_reward'] = df['discount'] * df['reward']
             # 将折扣奖励序列反转，表示从终止状态到开始状态的顺序。强化学习中，通常从终止状态反向计算回报。
             # .cumsum() 是 Pandas 中计算累积和的函数。在这里，它用于计算从反向顺序的折扣奖励序列的累积和。
             # 也就是说，每一步的折扣累积回报（discounted_return）是从后面的奖励开始加权累加的。
-            df['discounted_return'] = df['discounted_reward'][::-1].cumsum()
+            df['discounted_return'] = df['discounted_reward'][::-1].cumsum() # 第一项就存在折扣因子
             df['psi'] = df['discounted_return']
 
             # 将输入转换为 Tensor（200，4）
@@ -206,7 +207,7 @@ class VPGAgent(EnvInit):
                 baseline_output = self.baseline_net(state)  # 输出一个基线值（200，1）
                 # 每个状态的值函数估计
                 df['baseline'] = baseline_output.detach().numpy()  # detach() 不进行梯度计算
-                # 优势函数
+                # 优势函数，因为基线网络的输出是状态价值，第一项没有折扣因子，为了与df['psi']匹配需要乘上
                 df['psi'] -= (df['baseline'].squeeze() * df['discount'])
                 # 这里计算 df['return'] 列，它通常表示 标准化的回报，使用 除以折扣因子，这是为了消除折扣因子的影响并使回报恢复到接近于“未经折扣的回报”
                 df['return'] = df['discounted_return'] / df['discount']
@@ -220,23 +221,23 @@ class VPGAgent(EnvInit):
                 baseline_loss.backward()
                 self.baseline_optimizer.step()
 
-            # 策略网络训练，df['psi'].values：psi 列的numpy数据
-            y = torch.tensor(df['psi'].values, dtype=torch.float32)
+            # 策略网络训练，df['psi'].values：psi 列的numpy数据，无论是否归一化，代表的是一种相对影响，只要体现正负关系即可。
+            advantage = torch.tensor(df['psi'].values, dtype=torch.float32)
 
             self.policy_optimizer.zero_grad()
 
-            # 计算策略网络的输出
+            # 计算策略网络的输出，𝛑(a|s)
             policy_output = self.policy_net(state)
 
             # 使用负对数似然损失,由于策略梯度方法通常会使用 对数概率 来避免概率值非常小时的数值稳定性问题，
             # 因此这里对 policy_output（动作概率分布）取对数
             log_probs = torch.log(policy_output)
             # gather: 它从给定维度 dim 上根据指定的 index 选择对应的值
-            # gather(1, ...) 表示我们从 log_probs 中按列选择特定的动作概率,df['action'].values 表示动作的索引
-            # view(-1, 1)：行自动推断，列为一列
+            # gather(1, ...) 表示我们从 log_probs 中按列选择特定的动作概率,df['action'].values 表示action中的值-动作的索引
+            # view(-1, 1)：（-1）行自动推断，列为1列
             selected_log_probs = log_probs.gather(1, torch.tensor(df['action'].values, dtype=torch.long).view(-1, 1))
             # 最小化负期望回报
-            policy_loss = -(selected_log_probs * y.view(-1, 1)).mean()
+            policy_loss = -(selected_log_probs * advantage.view(-1, 1)).mean()
 
             policy_loss.backward()
             self.policy_optimizer.step()

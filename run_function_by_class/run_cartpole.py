@@ -25,5 +25,5 @@ def run_cartpole():
         1: lambda: env.game_iteration(policy_name[1]),  # 策略评估0
     }
     # 选择get_function中序号
-    choice_method = 1
+    choice_method = 0
     run_select_func(get_function, choice_method)
