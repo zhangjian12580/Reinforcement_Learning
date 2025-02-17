@@ -42,7 +42,7 @@ class EnvInit(Env):
 
         self.render = render
         # 游戏轮数
-        self.game_rounds = 20000
+        self.game_rounds = 30000
         # 获取动作空间的大小，即可选择的动作数量
         self.Action_Num = self.env.action_space.n
         # 位置
@@ -295,7 +295,7 @@ class VPGAgent(EnvInit):
 
 
 class OffPolicyVPGAgent(EnvInit):
-    def __init__(self, gamma=0.99, learning_rate=0.001):
+    def __init__(self, gamma=0.99, learning_rate=0.0001):
         """
         异策策略梯度
         :param gamma: 折扣因子
@@ -357,10 +357,10 @@ class OffPolicyVPGAgent(EnvInit):
 
         # 学习率调度器
         self.policy_scheduler = optim.lr_scheduler.StepLR(
-            self.off_policy_optimizer, step_size=1000, gamma=0.9
+            self.off_policy_optimizer, step_size=4000, gamma=0.9
         )
         self.baseline_scheduler = optim.lr_scheduler.StepLR(
-            self.off_baseline_optimizer, step_size=1000, gamma=0.9
+            self.off_baseline_optimizer, step_size=4000, gamma=0.9
         )
 
         # 加载模型
@@ -390,13 +390,15 @@ class OffPolicyVPGAgent(EnvInit):
         """
         state = torch.tensor(observation, dtype=torch.float32)
         logits = self.off_policy_net(state)
-        probs = F.softmax(logits / self.temperature, dim=-1)
+        probs = logits ** (1 / self.temperature)
+        probs /= probs.sum(dim=-1, keepdim=True)  # 重新归一化
 
         # 使用 epsilon-greedy 策略
         if np.random.rand() < 0.01 and self.global_is_train:  # epsilon = 0.1
             action = np.random.choice(self.Action_Num)
             behavior = 1.0 / self.Action_Num
         else:
+            # 虽然logits是策略网络生成，但是在action中脱离了梯度优化，所以与原策略网络不同，属于行为策略
             action = np.random.choice(self.Action_Num, p=probs.detach().numpy())
             behavior = probs[action].item()
 
@@ -429,13 +431,13 @@ class OffPolicyVPGAgent(EnvInit):
             # 计算基线值，状态价值
             baseline_values = self.off_baseline_net(states).squeeze()
 
-            # 计算优势函数
+            # 计算优势函数，Gt-V(s)
             advantages = returns - baseline_values.detach()
-
+            # 标准化操作
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             # 计算重要性权重
-            current_probs = F.softmax(self.off_policy_net(states), dim=-1)
+            current_probs = self.off_policy_net(states)
             # 根据动作选择概率
             selected_probs = current_probs.gather(1, actions.unsqueeze(1)).squeeze()
             # torch.clamp(..., 0.1, 10.0)：对计算出的权重进行裁剪（限制范围）
@@ -451,7 +453,7 @@ class OffPolicyVPGAgent(EnvInit):
 
             # 训练策略网络
             self.off_policy_optimizer.zero_grad()
-            log_probs = F.log_softmax(self.off_policy_net(states), dim=-1)
+            log_probs = torch.log(self.off_policy_net(states) + 1e-8)
             selected_log_probs = log_probs.gather(1, actions.unsqueeze(1))
             policy_loss = -(selected_log_probs * advantages.unsqueeze(1) * importance_weights.unsqueeze(1)).mean()
 
@@ -500,7 +502,7 @@ class OffPolicyVPGAgent(EnvInit):
                 with torch.no_grad():
                     state_tensor = torch.FloatTensor(observation)
                     probs = self.off_policy_net(state_tensor)
-                    # 使用确定性策略
+                    # 使用确定性策略，item() 方法将这个张量转换为 Python 的标量值
                     action = torch.argmax(probs).item()
                     behavior = 1
             else:
@@ -576,8 +578,8 @@ class CartPole(VPGAgent, OffPolicyVPGAgent):
                     if self.learn_step_counter % 10 == 0:  # 每 10 轮记录一次奖励
                         self.writer.add_scalar("Episode Reward", episode_reward, global_step=self.learn_step_counter)
                 if self.global_is_train:
-                    if False not in self.done_rate and np.round(np.mean(episode_rewards[-300:]),
-                                                                2) >= 198 and self.global_is_train:
+                    if False not in self.done_rate and len(self.done_rate) == 300 and np.round(np.mean(episode_rewards[-300:]),
+                                                                2) >= 198:
                         logger.info(f"!!!成功率已经达到百回合195，自动停止训练!!!")
                         break
             else:
